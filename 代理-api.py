@@ -2,28 +2,26 @@ import os
 import logging
 import threading
 import time
+import json
 from queue import Queue
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, stream_with_context, Response
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import geoip2.database
 import ping3
 import pycountry
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 # 设置日志配置
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 
+
 class ProxyManager:
     def __init__(self, max_workers=20):
-        self.proxies = {
-            'http': [],
-            'socks4': [],
-            'socks5': []
-        }
+        self.proxies = defaultdict(list)
         self.country_code_to_name = {country.alpha_2: country.name for country in pycountry.countries}
         self.geoip_reader = self.load_geoip_database()
         self.lock = threading.Lock()
@@ -48,9 +46,11 @@ class ProxyManager:
     def load_proxies_from_file(self, proxy_type, file_path):
         try:
             with open(file_path, 'r') as file:
-                proxies = file.read().splitlines()
-                for proxy in proxies:
-                    self.queue.put((proxy, proxy_type))
+                for line in file:
+                    proxy = line.strip()
+                    if proxy:
+                        self.queue.put((proxy, proxy_type))
+            logging.info(f"Loaded proxies from file: {file_path}")
         except FileNotFoundError:
             logging.error(f"Proxy file not found: {file_path}")
 
@@ -97,12 +97,13 @@ class ProxyManager:
             with self.lock:
                 self.proxies[result['type']].append(result)
             logging.info(f"Added proxy: {result['ip']}:{result['port']} ({result['type']})")
+        logging.debug(f"Current proxy count: {sum(len(proxies) for proxies in self.proxies.values())}")
 
     def measure_latency(self, ip):
         current_time = time.time()
         if ip in self.latency_cache and current_time - self.latency_cache_time.get(ip, 0) < 300:
             return self.latency_cache[ip]
-        
+
         try:
             result = ping3.ping(ip, timeout=2)
             latency = result * 1000 if result is not None else float('inf')
@@ -114,20 +115,15 @@ class ProxyManager:
             return float('inf')
 
     def get_proxies_by_country(self, country, proxy_type=None):
+        country_name = self.get_country_name(country).lower()
         with self.lock:
-            country_name = self.get_country_name(country)
             if proxy_type:
-                filtered_proxies = [
-                    proxy for proxy in self.proxies.get(proxy_type, [])
-                    if proxy.get('country', '').lower() == country_name.lower()
-                ]
+                return [proxy for proxy in self.proxies.get(proxy_type, [])
+                        if proxy.get('country', '').lower() == country_name]
             else:
-                filtered_proxies = [
-                    proxy for proxy_list in self.proxies.values()
-                    for proxy in proxy_list
-                    if proxy.get('country', '').lower() == country_name.lower()
-                ]
-            return filtered_proxies
+                return [proxy for proxy_list in self.proxies.values()
+                        for proxy in proxy_list
+                        if proxy.get('country', '').lower() == country_name]
 
     def get_country_name(self, country_code_or_name):
         if not country_code_or_name:
@@ -136,26 +132,27 @@ class ProxyManager:
         return country_name if country_name else country_code_or_name
 
     def get_available_countries(self):
+        country_counts = defaultdict(lambda: defaultdict(int))
         with self.lock:
-            country_counts = defaultdict(lambda: defaultdict(int))
             for proxy_type, proxy_list in self.proxies.items():
                 for proxy in proxy_list:
                     country = proxy.get('country')
                     if country and country != "Unknown":
                         country_counts[country][proxy_type] += 1
-            
-            country_data = []
-            for country_name, counts in country_counts.items():
-                country_code = next((code for code, name in self.country_code_to_name.items() if name == country_name), None)
-                if country_code:
-                    country_data.append({
-                        "name": country_name,
-                        "code": country_code,
-                        "counts": dict(counts),
-                        "total": sum(counts.values())
-                    })
-            
-            return sorted(country_data, key=lambda x: x['total'], reverse=True)
+
+        country_data = []
+        for country_name, counts in country_counts.items():
+            country_code = next((code for code, name in self.country_code_to_name.items() if name == country_name),
+                                None)
+            if country_code:
+                country_data.append({
+                    "name": country_name,
+                    "code": country_code,
+                    "counts": dict(counts),
+                    "total": sum(counts.values())
+                })
+
+        return sorted(country_data, key=lambda x: x['total'], reverse=True)
 
     def get_stats(self):
         with self.lock:
@@ -164,18 +161,19 @@ class ProxyManager:
                 "proxies_by_type": {proxy_type: len(proxies) for proxy_type, proxies in self.proxies.items()},
                 "proxies_by_country": defaultdict(lambda: defaultdict(int))
             }
-            
+
             for proxy_type, proxies in self.proxies.items():
                 for proxy in proxies:
                     country = proxy.get('country', 'Unknown')
                     stats["proxies_by_country"][country][proxy_type] += 1
-            
+
             # Convert defaultdict to regular dict for JSON serialization
             stats["proxies_by_country"] = dict(stats["proxies_by_country"])
             for country in stats["proxies_by_country"]:
                 stats["proxies_by_country"][country] = dict(stats["proxies_by_country"][country])
-            
+
             return stats
+
 
 class FileChangeHandler(FileSystemEventHandler):
     def __init__(self, proxy_manager):
@@ -188,6 +186,7 @@ class FileChangeHandler(FileSystemEventHandler):
             proxy_files = {proxy_type: event.src_path}
             self.proxy_manager.load_proxies_async(proxy_files)
 
+
 def start_watch(proxy_manager):
     path = 'output'
     event_handler = FileChangeHandler(proxy_manager)
@@ -195,12 +194,12 @@ def start_watch(proxy_manager):
     observer.schedule(event_handler, path, recursive=False)
     observer.start()
     try:
-        # 使用 Event 来阻塞主线程，而不是使用空的 while 循环
         stop_event = threading.Event()
         stop_event.wait()
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
+
 
 @app.route('/proxies', methods=['GET'])
 def get_proxies():
@@ -210,18 +209,25 @@ def get_proxies():
         return jsonify({"error": "Country parameter is required"}), 400
     if proxy_type and proxy_type not in proxy_manager.proxies:
         return jsonify({"error": f"Invalid proxy type: {proxy_type}"}), 400
+
     proxies = proxy_manager.get_proxies_by_country(country, proxy_type)
+    logging.info(f"Returning {len(proxies)} proxies for country: {country}, type: {proxy_type}")
     return jsonify(proxies)
+
 
 @app.route('/countries', methods=['GET'])
 def get_countries():
     countries = proxy_manager.get_available_countries()
+    logging.info(f"Returning data for {len(countries)} countries")
     return jsonify(countries)
+
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
     stats = proxy_manager.get_stats()
+    logging.info(f"Returning stats: total proxies = {stats['total_proxies']}")
     return jsonify(stats)
+
 
 if __name__ == '__main__':
     proxy_manager = ProxyManager()
