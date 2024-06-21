@@ -39,7 +39,7 @@ class ProxyManager:
     def load_proxies_async(self, proxy_files):
         with self.lock:
             self.proxies = {'http': [], 'socks4': [], 'socks5': []}  # 清空旧代理列表
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5000) as executor:
             futures = {executor.submit(self.load_proxies_from_file, proxy_type, file_path): proxy_type for proxy_type, file_path in proxy_files.items()}
             for future in concurrent.futures.as_completed(futures):
                 proxy_type = futures[future]
