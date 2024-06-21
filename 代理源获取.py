@@ -166,7 +166,7 @@ def check_http_proxy(proxy):
         'https': f'http://{proxy}'
     }
     try:
-        response = requests.get('http://www.example.com', proxies=proxies, timeout=5)
+        response = requests.get('http://www.example.com', proxies=proxies, timeout=2)
         if response.status_code == 200:
             logging.info(f"HTTP proxy {proxy} is working.")
             return proxy
@@ -199,7 +199,7 @@ def check_socks4_proxy(proxy):
 
     with socks_proxy(proxy, socks.SOCKS4):
         try:
-            response = requests.get('http://www.example.com', timeout=5)
+            response = requests.get('http://www.example.com', timeout=2)
             if response.status_code == 200:
                 logging.info(f"SOCKS4 proxy {proxy} is working.")
                 return proxy
@@ -221,7 +221,7 @@ def check_socks5_proxy(proxy):
 
     with socks_proxy(proxy, socks.SOCKS5):
         try:
-            response = requests.get('http://www.example.com', timeout=5)
+            response = requests.get('http://www.example.com', timeout=2)
             if response.status_code == 200:
                 logging.info(f"SOCKS5 proxy {proxy} is working.")
                 return proxy
