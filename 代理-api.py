@@ -91,10 +91,13 @@ class ProxyManager:
 
     def measure_latency(self, ip):
         try:
-            return ping3.ping(ip, timeout=2) * 1000  # 转换为毫秒
+            result = ping3.ping(ip, timeout=2)  # 返回值是秒或None
+            if result is None:
+                return float('inf')  # 如果ping不通，返回无穷大表示极高延迟
+            return result * 1000  # 转换为毫秒
         except Exception as e:
             logging.warning(f"Failed to measure latency for {ip}: {str(e)}")
-            return float('inf')
+            return float('inf')  # 出现异常时也返回无穷大
 
     def get_proxies_by_country(self, country, proxy_type=None):
         with self.lock:
