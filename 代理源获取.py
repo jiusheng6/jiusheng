@@ -233,7 +233,7 @@ def check_socks5_proxy(proxy):
 def check_proxies(proxies, check_function):
     checked_proxies = set()
     working_proxies = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5000) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=500) as executor:
         future_to_proxy = {executor.submit(check_function, proxy): proxy for proxy in proxies if proxy not in checked_proxies}
         for future in concurrent.futures.as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
