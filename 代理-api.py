@@ -7,6 +7,7 @@ import pycountry
 import concurrent.futures
 from operator import itemgetter
 from flask import Flask, jsonify, request
+import threading
 from threading import Thread
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -25,7 +26,7 @@ class ProxyManager:
         }
         self.country_code_to_name = {country.alpha_2: country.name for country in pycountry.countries}
         self.geoip_reader = self.load_geoip_database()
-        self.lock = concurrent.futures.Lock()
+        self.lock = threading.Lock()  # 使用threading模块的Lock
 
     def load_geoip_database(self):
         geoip_path = os.path.join('output', 'GeoLite2-City.mmdb')
@@ -39,7 +40,7 @@ class ProxyManager:
     def load_proxies_async(self, proxy_files):
         with self.lock:
             self.proxies = {'http': [], 'socks4': [], 'socks5': []}  # 清空旧代理列表
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5000) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as executor:
             futures = {executor.submit(self.load_proxies_from_file, proxy_type, file_path): proxy_type for proxy_type, file_path in proxy_files.items()}
             for future in concurrent.futures.as_completed(futures):
                 proxy_type = futures[future]
@@ -108,21 +109,24 @@ class FileChangeHandler(FileSystemEventHandler):
         self.proxy_manager = proxy_manager
 
     def on_modified(self, event):
-        if not event.is_directory and event.src_path.endswith('.txt'):
+        if not event.is_directory and event.src_path.endswith('.txt') and 'output' in event.src_path:
             logging.info(f"Detected change in {event.src_path}")
-            proxy_files = {
-                'http': 'output/valid_http_proxies.txt',
-                'socks4': 'output/valid_socks4_proxies.txt',
-                'socks5': 'output/valid_socks5_proxies.txt'
-            }
+            # Assuming file names follow the format 'valid_[type]_proxies.txt'
+            proxy_type = os.path.basename(event.src_path).split('_')[1]
+            proxy_files = {proxy_type: event.src_path}
             self.proxy_manager.load_proxies_async(proxy_files)
 
 def start_watch(proxy_manager):
-    path = 'output'  # 监控的目录
+    path = 'output'
     event_handler = FileChangeHandler(proxy_manager)
     observer = Observer()
     observer.schedule(event_handler, path, recursive=False)
     observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
     observer.join()
 
 @app.route('/proxies', methods=['GET'])
