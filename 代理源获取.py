@@ -151,7 +151,8 @@ proxy_pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+:\d+)')
 # 从网页获取代理列表
 def fetch_proxies(url):
     try:
-        response = requests.get(url)
+        # 使用空代理字典进行请求，确保直接使用本地网络连接
+        response = requests.get(url, proxies={})
         proxies = proxy_pattern.findall(response.text)
         return proxies
     except requests.RequestException as e:
@@ -232,7 +233,7 @@ def check_socks5_proxy(proxy):
 def check_proxies(proxies, check_function):
     checked_proxies = set()
     working_proxies = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5000) as executor:
         future_to_proxy = {executor.submit(check_function, proxy): proxy for proxy in proxies if proxy not in checked_proxies}
         for future in concurrent.futures.as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
