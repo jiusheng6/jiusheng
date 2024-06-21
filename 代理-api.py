@@ -163,4 +163,4 @@ if __name__ == '__main__':
     update_thread = Thread(target=proxy_manager.update_loop, daemon=True)
     update_thread.start()
 
-    app.run(debug=True, port=8000)
+    app.run(debug=True,host='0.0.0.0', port=8000)
