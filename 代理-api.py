@@ -21,7 +21,7 @@ app = Flask(__name__)
 class ProxyManager:
     def __init__(self, max_workers=20):
         self.proxies = defaultdict(list)
-        self.proxy_sets = defaultdict(set)  # 新增：用于存储每种类型的代理集合
+        self.proxy_sets = defaultdict(set)
         self.country_code_to_name = {country.alpha_2: country.name for country in pycountry.countries}
         self.geoip_reader = self.load_geoip_database()
         self.lock = threading.Lock()
@@ -103,17 +103,23 @@ class ProxyManager:
             return None
 
     def add_proxy_callback(self, future):
-        result = future.result()
-        if result:
-            proxy_key = f"{result['ip']}:{result['port']}"
-            with self.lock:
-                if proxy_key not in self.proxy_sets[result['type']]:
-                    self.proxies[result['type']].append(result)
-                    self.proxy_sets[result['type']].add(proxy_key)
-                    logging.info(f"Added proxy: {proxy_key} ({result['type']}) - Last check: {result['last_check']}")
-                else:
-                    logging.debug(f"Proxy already exists: {proxy_key} ({result['type']})")
-        logging.debug(f"Current proxy count: {sum(len(proxies) for proxies in self.proxies.values())}")
+        try:
+            result = future.result()
+            if result is not None and 'type' in result:
+                proxy_key = f"{result['ip']}:{result['port']}"
+                with self.lock:
+                    if proxy_key not in self.proxy_sets[result['type']]:
+                        self.proxies[result['type']].append(result)
+                        self.proxy_sets[result['type']].add(proxy_key)
+                        logging.info(f"Added proxy: {proxy_key} ({result['type']}) - Last check: {result['last_check']}")
+                    else:
+                        logging.debug(f"Proxy already exists: {proxy_key} ({result['type']})")
+            else:
+                logging.warning(f"Invalid result from process_single_proxy: {result}")
+        except Exception as e:
+            logging.error(f"Error in add_proxy_callback: {str(e)}")
+        finally:
+            logging.debug(f"Current proxy count: {sum(len(proxies) for proxies in self.proxies.values())}")
 
     def measure_latency(self, ip):
         current_time = time.time()
@@ -235,7 +241,7 @@ class FileChangeHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith('.txt'):
             logging.info(f"Detected change in {event.src_path}")
-            proxy_type = os.path.basename(event.src_path).split('_')[1]
+            proxy_type = os.path.basename(event.src_path).split('_')[1].split('.')[0]  # Extract proxy type from filename
             proxy_files = {proxy_type: event.src_path}
             self.proxy_manager.load_proxies_async(proxy_files)
 
