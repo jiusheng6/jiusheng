@@ -8,6 +8,8 @@ import socks
 import schedule
 import time
 from contextlib import contextmanager
+# 强制 requests 库使用 IPv4
+requests.packages.urllib3.util.connection.HAS_IPV6 = False
 
 # 配置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
