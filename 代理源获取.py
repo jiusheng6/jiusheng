@@ -152,7 +152,7 @@ proxy_pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+:\d+)')
 def fetch_proxies(url):
     try:
         # 使用空代理字典进行请求，确保直接使用本地网络连接
-        response = requests.get(url, proxies={})
+        response = requests.get(url, proxies={}, timeout=10)
         proxies = proxy_pattern.findall(response.text)
         return proxies
     except requests.RequestException as e:
