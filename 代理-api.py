@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 import time
-import json
+from datetime import datetime
 from queue import Queue
 from flask import Flask, jsonify, request
 from watchdog.observers import Observer
@@ -21,6 +21,7 @@ app = Flask(__name__)
 class ProxyManager:
     def __init__(self, max_workers=20):
         self.proxies = defaultdict(list)
+        self.proxy_sets = defaultdict(set)  # 新增：用于存储每种类型的代理集合
         self.country_code_to_name = {country.alpha_2: country.name for country in pycountry.countries}
         self.geoip_reader = self.load_geoip_database()
         self.lock = threading.Lock()
@@ -44,6 +45,11 @@ class ProxyManager:
 
     def load_proxies_from_file(self, proxy_type, file_path):
         try:
+            with self.lock:
+                # 清空该类型的代理列表和集合
+                self.proxies[proxy_type] = []
+                self.proxy_sets[proxy_type] = set()
+
             with open(file_path, 'r') as file:
                 for line in file:
                     proxy = line.strip()
@@ -79,7 +85,6 @@ class ProxyManager:
                     logging.warning(f"IP address not found in GeoIP database: {ip}")
             latency = self.measure_latency(ip)
             
-            # 检查代理是否有效
             if latency == float('inf'):
                 logging.info(f"Proxy {ip}:{port} is invalid (high latency)")
                 return None
@@ -90,7 +95,8 @@ class ProxyManager:
                 'type': proxy_type,
                 'country': country,
                 'city': city,
-                'latency': latency
+                'latency': latency,
+                'last_check': datetime.now().isoformat()
             }
         except Exception as e:
             logging.error(f"Error processing proxy {proxy}: {str(e)}")
@@ -99,9 +105,14 @@ class ProxyManager:
     def add_proxy_callback(self, future):
         result = future.result()
         if result:
+            proxy_key = f"{result['ip']}:{result['port']}"
             with self.lock:
-                self.proxies[result['type']].append(result)
-            logging.info(f"Added proxy: {result['ip']}:{result['port']} ({result['type']})")
+                if proxy_key not in self.proxy_sets[result['type']]:
+                    self.proxies[result['type']].append(result)
+                    self.proxy_sets[result['type']].add(proxy_key)
+                    logging.info(f"Added proxy: {proxy_key} ({result['type']}) - Last check: {result['last_check']}")
+                else:
+                    logging.debug(f"Proxy already exists: {proxy_key} ({result['type']})")
         logging.debug(f"Current proxy count: {sum(len(proxies) for proxies in self.proxies.values())}")
 
     def measure_latency(self, ip):
@@ -178,6 +189,22 @@ class ProxyManager:
             
             return stats
 
+    def is_proxy_valid(self, proxy):
+        # 检查上次验证时间是否超过1小时
+        last_check = datetime.fromisoformat(proxy['last_check'])
+        if (datetime.now() - last_check).total_seconds() < 3600:  # 3600秒 = 1小时
+            return True
+        
+        # 如果超过1小时，重新验证
+        latency = self.measure_latency(proxy['ip'])
+        if latency == float('inf'):
+            return False
+        
+        # 更新代理信息
+        proxy['latency'] = latency
+        proxy['last_check'] = datetime.now().isoformat()
+        return True
+
     def remove_invalid_proxies(self):
         removed_count = 0
         with self.lock:
@@ -188,13 +215,10 @@ class ProxyManager:
                         valid_proxies.append(proxy)
                     else:
                         removed_count += 1
+                        self.proxy_sets[proxy_type].remove(f"{proxy['ip']}:{proxy['port']}")
                         logging.info(f"Removed invalid proxy: {proxy['ip']}:{proxy['port']} ({proxy_type})")
                 self.proxies[proxy_type] = valid_proxies
         logging.info(f"Removed {removed_count} invalid proxies")
-
-    def is_proxy_valid(self, proxy):
-        # 这里可以添加更多的验证逻辑
-        return proxy['latency'] != float('inf')
 
     def start_periodic_cleanup(self, interval=3600):
         def cleanup():
@@ -238,8 +262,10 @@ def get_proxies():
         return jsonify({"error": f"Invalid proxy type: {proxy_type}"}), 400
     
     proxies = proxy_manager.get_proxies_by_country(country, proxy_type)
-    logging.info(f"Returning {len(proxies)} proxies for country: {country}, type: {proxy_type}")
-    return jsonify(proxies)
+    # 在返回之前过滤掉无效代理
+    valid_proxies = [proxy for proxy in proxies if proxy_manager.is_proxy_valid(proxy)]
+    logging.info(f"Returning {len(valid_proxies)} valid proxies for country: {country}, type: {proxy_type}")
+    return jsonify(valid_proxies)
 
 @app.route('/countries', methods=['GET'])
 def get_countries():
@@ -255,7 +281,7 @@ def get_stats():
 
 if __name__ == '__main__':
     proxy_manager = ProxyManager()
-    proxy_manager.start_periodic_cleanup()  # 启动定期清理
+    proxy_manager.start_periodic_cleanup()
     watch_thread = threading.Thread(target=start_watch, args=(proxy_manager,), daemon=True)
     watch_thread.start()
     app.run(debug=False, host='0.0.0.0', port=8000)
