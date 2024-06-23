@@ -199,7 +199,7 @@ class ProxyManager:
         # 检查上次验证时间是否超过1小时
         last_check = datetime.fromisoformat(proxy['last_check'])
         if (datetime.now() - last_check).total_seconds() < 3600:  # 3600秒 = 1小时
-            return True
+            return proxy['latency'] != float('inf')  # 即使在1小时内，如果延迟是Infinity也视为无效
         
         # 如果超过1小时，重新验证
         latency = self.measure_latency(proxy['ip'])
@@ -214,7 +214,7 @@ class ProxyManager:
     def remove_invalid_proxies(self):
         removed_count = 0
         with self.lock:
-            for proxy_type in self.proxies:
+            for proxy_type in list(self.proxies.keys()):  # 使用列表复制键，因为我们可能会在循环中修改字典
                 valid_proxies = []
                 for proxy in self.proxies[proxy_type]:
                     if self.is_proxy_valid(proxy):
@@ -244,6 +244,8 @@ class FileChangeHandler(FileSystemEventHandler):
             proxy_type = os.path.basename(event.src_path).split('_')[1].split('.')[0]  # Extract proxy type from filename
             proxy_files = {proxy_type: event.src_path}
             self.proxy_manager.load_proxies_async(proxy_files)
+            # 强制立即进行一次清理
+            self.proxy_manager.remove_invalid_proxies()
 
 def start_watch(proxy_manager):
     path = 'output'
