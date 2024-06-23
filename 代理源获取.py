@@ -2,13 +2,15 @@ import requests
 import re
 import logging
 import concurrent.futures
-from requests.exceptions import ProxyError
-import socket
-import socks
 import schedule
 import time
-from contextlib import contextmanager
-# 强制 requests 库使用 IPv4
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
+
+# 配置日志记录
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 强制使用 IPv4
 requests.packages.urllib3.util.connection.HAS_IPV6 = False
 
 # 配置日志记录
@@ -150,149 +152,103 @@ socks5_sources = [
 # 匹配代理IP和端口的正则表达式
 proxy_pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+:\d+)')
 
-# 从网页获取代理列表
 def fetch_proxies(url):
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    
     try:
-        # 使用空代理字典进行请求，确保直接使用本地网络连接
-        response = requests.get(url, proxies={}, timeout=10)
+        response = session.get(url, timeout=10)
         proxies = proxy_pattern.findall(response.text)
         return proxies
     except requests.RequestException as e:
         logging.error(f"Error fetching proxies from {url}: {e}")
         return []
 
-# 检测HTTP代理
-def check_http_proxy(proxy):
+def check_proxy(proxy, proxy_type):
     proxies = {
-        'http': f'http://{proxy}',
-        'https': f'http://{proxy}'
+        'http': f'{proxy_type}://{proxy}',
+        'https': f'{proxy_type}://{proxy}'
     }
     try:
-        response = requests.get('http://www.example.com', proxies=proxies, timeout=2)
+        response = requests.get('http://www.example.com', proxies=proxies, timeout=5)
         if response.status_code == 200:
-            logging.info(f"HTTP proxy {proxy} is working.")
+            logging.info(f"{proxy_type.upper()} proxy {proxy} is working.")
             return proxy
-    except (requests.RequestException, ProxyError):
-        logging.info(f"HTTP proxy {proxy} failed.")
+    except requests.RequestException:
+        logging.info(f"{proxy_type.upper()} proxy {proxy} failed.")
     return None
 
-@contextmanager
-def socks_proxy(proxy, socks_type):
-    ip, port = proxy.split(':')
-    default_socket = socket.socket
-    socks.set_default_proxy(socks_type, ip, int(port))
-    socket.socket = socks.socksocket
-    try:
-        yield
-    finally:
-        socket.socket = default_socket
-
-# 检测SOCKS4代理
-def check_socks4_proxy(proxy):
-    try:
-        ip, port = proxy.split(':')
-        port = int(port)
-        if not 0 <= port <= 65535:
-            logging.info(f"SOCKS4 proxy {proxy} has an invalid port.")
-            return None
-    except ValueError:
-        logging.info(f"SOCKS4 proxy {proxy} has an invalid format.")
-        return None
-
-    with socks_proxy(proxy, socks.SOCKS4):
-        try:
-            response = requests.get('http://www.example.com', timeout=2)
-            if response.status_code == 200:
-                logging.info(f"SOCKS4 proxy {proxy} is working.")
-                return proxy
-        except (requests.RequestException, ProxyError, socks.ProxyError):
-            logging.info(f"SOCKS4 proxy {proxy} failed.")
-    return None
-
-# 检测SOCKS5代理
-def check_socks5_proxy(proxy):
-    try:
-        ip, port = proxy.split(':')
-        port = int(port)
-        if not 0 <= port <= 65535:
-            logging.info(f"SOCKS5 proxy {proxy} has an invalid port.")
-            return None
-    except ValueError:
-        logging.info(f"SOCKS5 proxy {proxy} has an invalid format.")
-        return None
-
-    with socks_proxy(proxy, socks.SOCKS5):
-        try:
-            response = requests.get('http://www.example.com', timeout=2)
-            if response.status_code == 200:
-                logging.info(f"SOCKS5 proxy {proxy} is working.")
-                return proxy
-        except (requests.RequestException, ProxyError, socks.ProxyError):
-            logging.info(f"SOCKS5 proxy {proxy} failed.")
-    return None
-
-# 多线程检测代理
-def check_proxies(proxies, check_function):
-    checked_proxies = set()
+def check_proxies(proxies, proxy_type):
     working_proxies = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=500) as executor:
-        future_to_proxy = {executor.submit(check_function, proxy): proxy for proxy in proxies if proxy not in checked_proxies}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+        future_to_proxy = {executor.submit(check_proxy, proxy, proxy_type): proxy for proxy in proxies}
         for future in concurrent.futures.as_completed(future_to_proxy):
-            proxy = future_to_proxy[future]
-            checked_proxies.add(proxy)
             if future.result():
-                working_proxies.append(proxy)
+                working_proxies.append(future.result())
     return working_proxies
 
+def fetch_all_proxies(sources):
+    proxies = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        future_to_url = {executor.submit(fetch_proxies, url): url for url in sources}
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                proxies.extend(future.result())
+            except Exception as exc:
+                logging.error(f'{url} generated an exception: {exc}')
+    return proxies
+
 def run_proxy_check():
-    http_proxies = []
-    socks4_proxies = []
-    socks5_proxies = []
+    http_proxies = fetch_all_proxies(http_sources)
+    socks4_proxies = fetch_all_proxies(socks4_sources)
+    socks5_proxies = fetch_all_proxies(socks5_sources)
 
-    for source in http_sources:
-        http_proxies.extend(fetch_proxies(source))
-    for source in socks4_sources:
-        socks4_proxies.extend(fetch_proxies(source))
-    for source in socks5_sources:
-        socks5_proxies.extend(fetch_proxies(source))
+    http_working_proxies = check_proxies(http_proxies, 'http')
+    socks4_working_proxies = check_proxies(socks4_proxies, 'socks4')
+    socks5_working_proxies = check_proxies(socks5_proxies, 'socks5')
 
-    http_working_proxies = check_proxies(http_proxies, check_http_proxy)
-    socks4_working_proxies = check_proxies(socks4_proxies, check_socks4_proxy)
-    socks5_working_proxies = check_proxies(socks5_proxies, check_socks5_proxy)
-
-    logging.info(f"Working HTTP proxies: {http_working_proxies}")
-    logging.info(f"Working SOCKS4 proxies: {socks4_working_proxies}")
-    logging.info(f"Working SOCKS5 proxies: {socks5_working_proxies}")
-
-    # 保存有效的HTTP代理到文件
+    # 保存有效的代理到文件
     with open("output/valid_http_proxies.txt", "w") as file:
         file.write("\n".join(http_working_proxies))
-        logging.info(f"已将 {len(http_working_proxies)} 个有效的 HTTP 代理保存到 valid_http_proxies.txt 文件中")
+    logging.info(f"已将 {len(http_working_proxies)} 个有效的 HTTP 代理保存到 valid_http_proxies.txt 文件中")
 
-    # 保存有效的SOCKS4代理到文件
     with open("output/valid_socks4_proxies.txt", "w") as file:
         file.write("\n".join(socks4_working_proxies))
-        logging.info(f"已将 {len(socks4_working_proxies)} 个有效的 SOCKS4 代理保存到 valid_socks4_proxies.txt 文件中")
+    logging.info(f"已将 {len(socks4_working_proxies)} 个有效的 SOCKS4 代理保存到 valid_socks4_proxies.txt 文件中")
 
-    # 保存有效的SOCKS5代理到文件
     with open("output/valid_socks5_proxies.txt", "w") as file:
         file.write("\n".join(socks5_working_proxies))
-        logging.info(f"已将 {len(socks5_working_proxies)} 个有效的 SOCKS5 代理保存到 valid_socks5_proxies.txt 文件中")
+    logging.info(f"已将 {len(socks5_working_proxies)} 个有效的 SOCKS5 代理保存到 valid_socks5_proxies.txt 文件中")
 
-    # 合并所有有效的代理并保存到总文件
     all_valid_proxies = http_working_proxies + socks4_working_proxies + socks5_working_proxies
     with open("output/all_valid_proxies.txt", "w") as file:
         file.write("\n".join(all_valid_proxies))
-        logging.info(f"已将所有的 {len(all_valid_proxies)} 个有效代理保存到 all_valid_proxies.txt 文件中")
+    logging.info(f"已将所有的 {len(all_valid_proxies)} 个有效代理保存到 all_valid_proxies.txt 文件中")
 
     logging.info("代理检测和保存完成。")
 
+def run_proxy_check_with_retry():
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            run_proxy_check()
+            break
+        except Exception as e:
+            logging.error(f"Error during proxy check (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(60)  # 等待1分钟后重试
+            else:
+                logging.error("Max retries reached. Skipping this round of proxy checks.")
+
 if __name__ == "__main__":
     # 初次运行代理检测任务
-    run_proxy_check()
+    run_proxy_check_with_retry()
 
     # 设置每60分钟运行一次代理检测任务
-    schedule.every(60).minutes.do(run_proxy_check)
+    schedule.every(60).minutes.do(run_proxy_check_with_retry)
 
     # 持续运行定时任务
     while True:
